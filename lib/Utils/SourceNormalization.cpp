@@ -375,6 +375,20 @@ size_t cling::utils::getWrapPoint(std::string& source,
       return std::string::npos;
     }
 
+    do {
+      if (Tok.getKind() == tok::raw_identifier) {
+        StringRef keyword(Tok.getRawIdentifier());
+        if (keyword.equals("__global__") || keyword.equals("__device__") ||
+            keyword.equals("__host__"))
+          Lex.Lex(Tok);
+        else
+          break;
+      } else
+        break;
+    } while (true);
+
+
+
     // Prior behavior was to return getFileOffset, which was only used as an
     // in a test against std::string::npos. By returning 0 we preserve prior
     // behavior to pass the test against std::string::npos and wrap everything
