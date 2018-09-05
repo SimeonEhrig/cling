@@ -65,6 +65,8 @@ namespace cling {
     // This code will write to the first .cu-file. It is necessary that some
     // cling generated code can be handled.
     const std::string initialCUDADeviceCode =
+        "extern void setValueNoAlloc(void* vpI, void* vpSVR, void* vpQT, char "
+        "vpOn);\n"
         "extern void setValueNoAlloc(void* vpI, void* vpV, void* vpQT, char "
         "vpOn, float value);\n"
         "extern void setValueNoAlloc(void* vpI, void* vpV, void* vpQT, char "
@@ -74,7 +76,9 @@ namespace cling {
         "extern void setValueNoAlloc(void* vpI, void* vpV, void* vpQT, char "
         "vpOn, unsigned long long value);\n"
         "extern void setValueNoAlloc(void* vpI, void* vpV, void* vpQT, char "
-        "vpOn, const void* value);\n";
+        "vpOn, const void* value);\n"
+        "extern void* setValueWithAlloc(void* vpI, void* vpV, void* vpQT,"
+        " char vpOn);\n";
 
     std::error_code EC;
     llvm::raw_fd_ostream cuFile(m_FilePath + "cling0.cu", EC,
@@ -279,6 +283,26 @@ namespace cling {
                 implFunc.end()) {
               foundUnwrappedDecl = true;
               decl->print(cuFile);
+              // The c++ code has no whitespace and semicolon at the end.
+              cuFile << ";\n";
+            }
+          }
+        }
+      }
+    }
+
+    // Workaround for impossible state at xeus-cling
+    if(!foundUnwrappedDecl){
+      for(auto iDCI = T->decls_begin(), eDCI = T->decls_end();
+            iDCI != eDCI; ++iDCI){
+        if (iDCI->m_Call ==
+            Transaction::ConsumerCallInfo::kCCIHandleTopLevelDecl) {
+          for (clang::DeclGroupRef::const_iterator iDecl = iDCI->m_DGR.begin(),
+               eDecl = iDCI->m_DGR.end();
+               iDecl != eDecl; ++iDecl) {
+            if(clang::VarDecl * v = llvm::dyn_cast<clang::VarDecl>(*iDecl)){
+              foundUnwrappedDecl = true;
+              v->print(cuFile);
               // The c++ code has no whitespace and semicolon at the end.
               cuFile << ";\n";
             }
