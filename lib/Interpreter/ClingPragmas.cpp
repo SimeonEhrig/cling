@@ -9,6 +9,7 @@
 
 #include "ClingPragmas.h"
 
+#include "cling/Interpreter/DynamicLibraryManager.h"
 #include "cling/Interpreter/Interpreter.h"
 #include "cling/Interpreter/Transaction.h"
 #include "cling/Utils/Output.h"
@@ -31,6 +32,10 @@ using namespace clang;
 namespace {
   class ClingPragmaHandler: public PragmaHandler {
     Interpreter& m_Interp;
+    typedef llvm::DenseMap<const clang::FileEntry*, const Transaction*> Watermarks;
+    typedef llvm::DenseMap<const Transaction*, const clang::FileEntry*> ReverseWatermarks;
+    Watermarks m_Watermarks;
+    ReverseWatermarks m_ReverseWatermarks;
 
     struct SkipToEOD {
       Preprocessor& m_PP;
@@ -48,6 +53,7 @@ namespace {
 
     enum {
       kLoadFile,
+      kUnloadFile,
       kAddLibrary,
       kAddInclude,
       // Put all commands that expand environment variables above this
@@ -59,6 +65,22 @@ namespace {
       kOptimize,
       kInvalidCommand,
     };
+
+    void registerUnloadPoint(const Transaction* unloadPoint,
+                                     llvm::StringRef filename) {
+      std::string canFile = m_Interp.lookupFileOrLibrary(filename);
+      if (canFile.empty())
+        canFile = filename;
+      clang::SourceManager& SM = m_Interp.getSema().getSourceManager();
+      clang::FileManager& FM = SM.getFileManager();
+      const clang::FileEntry* Entry
+        = FM.getFile(canFile, /*OpenFile*/false, /*CacheFailure*/false);
+      if (Entry && !m_Watermarks[Entry]) { // register as a watermark
+        m_Watermarks[Entry] = unloadPoint;
+        m_ReverseWatermarks[unloadPoint] = Entry;
+        //fprintf(stderr,"DEBUG: Load for %s recorded unloadPoint %p\n",file.str().c_str(),unloadPoint);
+      }
+    }
 
     bool GetNextLiteral(Preprocessor& PP, Token& Tok, std::string& Literal,
                         unsigned Cmd, const char* firstTime = nullptr) const {
@@ -105,12 +127,14 @@ namespace {
 
     void ReportCommandErr(Preprocessor& PP, const Token& Tok) {
       PP.Diag(Tok.getLocation(), diag::err_expected)
-        << "load, add_library_path, or add_include_path";
+        << "load, unload, add_library_path, or add_include_path";
     }
 
     int GetCommand(const StringRef CommandStr) {
       if (CommandStr == "load")
         return kLoadFile;
+      if (CommandStr == "unload")
+        return kUnloadFile;
       else if (CommandStr == "add_library_path")
         return kAddLibrary;
       else if (CommandStr == "add_include_path")
@@ -150,9 +174,67 @@ namespace {
                                             TU, m_Interp.getSema().TUScope);
       Interpreter::PushTransactionRAII pushedT(&m_Interp);
 
+      const Transaction* unloadPoint = m_Interp.getLastTransaction();
       for (std::string& File : Files) {
         if (m_Interp.loadFile(File, true) != Interpreter::kSuccess)
           return;
+        else
+          registerUnloadPoint(unloadPoint, File);
+      }
+    }
+
+    void UnloadCommand(Preprocessor& PP, Token& Tok, std::string Literal) {
+      // FIXME: unload, once implemented, must return success / failure
+      // Lookup the file
+      clang::SourceManager& SM = m_Interp.getSema().getSourceManager();
+      clang::FileManager& FM = SM.getFileManager();
+
+      //Get the canonical path, taking into account interp and system search paths
+      std::string canonicalFile = m_Interp.lookupFileOrLibrary(Literal);
+      const clang::FileEntry* Entry
+        = FM.getFile(canonicalFile, /*OpenFile*/false, /*CacheFailure*/false);
+      if (Entry) {
+        Watermarks::iterator Pos = m_Watermarks.find(Entry);
+         //fprintf(stderr,"DEBUG: unload request for %s\n",file.str().c_str());
+
+        if (Pos != m_Watermarks.end()) {
+          const Transaction* unloadPoint = Pos->second;
+          // Search for the transaction, i.e. verify that is has not already
+          // been unloaded ; This can be removed once all transaction unload
+          // properly information MetaSema that it has been unloaded.
+          bool found = false;
+          //for (auto t : m_Interpreter.m_IncrParser->getAllTransactions()) {
+          for(const Transaction *t = m_Interp.getFirstTransaction();
+              t != 0; t = t->getNext()) {
+             //fprintf(stderr,"DEBUG: On unload check For %s unloadPoint is %p are t == %p\n",file.str().c_str(),unloadPoint, t);
+            if (t == unloadPoint ) {
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            llvm::errs() << "!!!ERROR: Transaction for file: " << Literal << " has already been unloaded\n";
+          } else {
+             //fprintf(stderr,"DEBUG: On Unload For %s unloadPoint is %p\n",file.str().c_str(),unloadPoint);
+            while(m_Interp.getLastTransaction() != unloadPoint) {
+               //fprintf(stderr,"DEBUG: unload transaction %p (searching for %p)\n",m_Interpreter.getLastTransaction(),unloadPoint);
+              const clang::FileEntry* EntryUnloaded
+                = m_ReverseWatermarks[m_Interp.getLastTransaction()];
+              if (EntryUnloaded) {
+                Watermarks::iterator PosUnloaded
+                  = m_Watermarks.find(EntryUnloaded);
+                if (PosUnloaded != m_Watermarks.end()) {
+                  m_Watermarks.erase(PosUnloaded);
+                }
+              }
+              m_Interp.unload(/*numberOfTransactions*/1);
+            }
+          }
+          DynamicLibraryManager* DLM = m_Interp.getDynamicLibraryManager();
+          if (DLM->isLibraryLoaded(canonicalFile))
+            DLM->unloadLibrary(canonicalFile);
+          m_Watermarks.erase(Pos);
+        }
       }
     }
 
@@ -223,7 +305,9 @@ namespace {
 
       switch (Command) {
         case kLoadFile:
-        return LoadCommand(PP, Tok, std::move(Literal));
+          return LoadCommand(PP, Tok, std::move(Literal));
+        case kUnloadFile:
+          return UnloadCommand(PP, Tok, std::move(Literal));
         case kOptimize:
           return OptimizeCommand(Literal.c_str());
 
