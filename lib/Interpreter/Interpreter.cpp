@@ -649,6 +649,9 @@ namespace cling {
                               E.Group == frontend::Angled);
       }
     }
+
+    if (m_CUDACompiler)
+      m_CUDACompiler->getPTXInterpreter()->AddIncludePaths(PathStr, Delm);
   }
 
   void Interpreter::AddIncludePath(llvm::StringRef PathsStr) {
